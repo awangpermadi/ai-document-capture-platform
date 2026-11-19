@@ -7,11 +7,14 @@ class ReceiptMerger:
         primary: Receipt,
         fallback: Receipt,
     ) -> Receipt:
-        if not primary.merchant.name:
+        if primary.merchant.name is None:
             primary.merchant.name = fallback.merchant.name
 
-        if not primary.merchant.address:
+        if primary.merchant.address is None:
             primary.merchant.address = fallback.merchant.address
+
+        if primary.merchant.phone is None:
+            primary.merchant.phone = fallback.merchant.phone
 
         if primary.transaction.date is None:
             primary.transaction.date = fallback.transaction.date

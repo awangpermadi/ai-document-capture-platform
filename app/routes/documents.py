@@ -191,20 +191,25 @@ async def analyze_document(file: UploadFile = File(...)) -> Receipt:
             detail="Document analysis failed."
         ) from None
 
-    receipt = ReceiptNormalizer().normalize(result)
-    receipt = ReceiptExtractionValidator.validate(receipt)
+    azure_receipt = ReceiptNormalizer().normalize(result)
+    raw_content = result.content
 
-    if receipt.requires_review:
+    if raw_content and raw_content.strip():
         try:
-            fallback = ReceiptTextParser.parse(result.content or "")
+            fallback_receipt = ReceiptTextParser.parse(
+                raw_content,
+                pages=getattr(result, "pages", None),
+            )
         except ValueError:
             logger.warning("OCR receipt text fallback parsing failed.")
-            fallback = Receipt()
+            fallback_receipt = Receipt()
 
-        receipt = ReceiptMerger.merge(receipt, fallback)
-        receipt = ReceiptExtractionValidator.validate(receipt)
+        final_receipt = ReceiptMerger.merge(azure_receipt, fallback_receipt)
+    else:
+        final_receipt = azure_receipt
 
-    return receipt
+    final_receipt = ReceiptExtractionValidator.validate(final_receipt)
+    return final_receipt
 
 
 @router.post("/debug-analysis")
