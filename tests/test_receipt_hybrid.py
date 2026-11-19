@@ -421,7 +421,7 @@ class HybridAnalyzeRouteTests(unittest.TestCase):
         )
 
         with patch(
-            "app.routes.documents.AzureDocumentIntelligenceService",
+            "app.services.receipt_extraction.AzureDocumentIntelligenceService",
             return_value=service,
         ), TestClient(app) as client:
             response = client.post(

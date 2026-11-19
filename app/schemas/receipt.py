@@ -1,15 +1,19 @@
 from datetime import date as Date, time as Time
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Merchant(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     name: str | None = None
     address: str | None = None
     phone: str | None = None
 
 
 class ReceiptItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     description_raw: str | None = None
     description_normalized: str | None = None
     quantity: float | None = None
@@ -19,7 +23,13 @@ class ReceiptItem(BaseModel):
     source: str = "azure_prebuilt_receipt"
 
 
+class ReceiptItemRead(ReceiptItem):
+    id: str | None = None
+
+
 class Transaction(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     date: Date | None = None
     time: Time | None = None
     subtotal: float | None = None
@@ -33,6 +43,8 @@ class Transaction(BaseModel):
 
 
 class Receipt(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     document_type: str = "receipt"
 
     merchant: Merchant = Field(default_factory=Merchant)
@@ -44,3 +56,7 @@ class Receipt(BaseModel):
 
     requires_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
+
+
+class ReceiptRead(Receipt):
+    items: list[ReceiptItemRead] = Field(default_factory=list)
