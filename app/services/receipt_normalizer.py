@@ -27,6 +27,10 @@ class ReceiptNormalizer:
         tax_field = self._get_field(fields, "TotalTax")
         tip_field = self._get_field(fields, "Tip")
         total_field = self._get_field(fields, "Total")
+        cash_field = self._get_field(fields, "Cash")
+        change_field = self._get_field(fields, "Change")
+        if change_field is None:
+            change_field = self._get_field(fields, "ChangeDue")
 
         return Receipt(
             merchant=Merchant(
@@ -44,11 +48,18 @@ class ReceiptNormalizer:
                 tax=self._number(tax_field),
                 tip=self._number(tip_field),
                 total=self._number(total_field),
+                cash=self._number(cash_field),
+                change=self._number(change_field),
                 currency=self._currency_code(
                     subtotal_field,
                     tax_field,
                     tip_field,
                     total_field,
+                    cash_field,
+                    change_field,
+                ),
+                payment_method=self._text(
+                    self._get_field(fields, "PaymentMethod")
                 ),
             ),
             items=self._items(self._get_field(fields, "Items")),

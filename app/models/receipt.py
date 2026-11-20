@@ -33,6 +33,7 @@ class ReceiptModel(Base):
     cash: Mapped[float | None] = mapped_column(Float)
     change: Mapped[float | None] = mapped_column(Float)
     currency: Mapped[str | None] = mapped_column(String(10), default="IDR")
+    payment_method: Mapped[str | None] = mapped_column(String(100))
     extraction_method: Mapped[str] = mapped_column(
         String(100), default="prebuilt_receipt"
     )

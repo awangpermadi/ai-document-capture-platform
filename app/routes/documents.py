@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, TypeVar
@@ -32,6 +32,12 @@ from app.services.document_intelligence import (
     AzureDocumentIntelligenceService,
     DocumentIntelligenceError,
 )
+from app.services.document_input import (
+    MAX_FILE_SIZE,
+    DocumentInputError,
+    DocumentValidator,
+    ValidatedDocument,
+)
 from app.services.document_review import DocumentReviewService
 from app.services.receipt_extraction import ReceiptExtractionService
 from app.services.receipt_persistence import ReceiptPersistenceService
@@ -43,14 +49,6 @@ router = APIRouter(
 )
 
 UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
-
-ALLOWED_CONTENT_TYPES = {
-    "image/jpeg",
-    "image/png",
-    "application/pdf",
-}
-
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 logger = logging.getLogger(__name__)
 _ResponseT = TypeVar("_ResponseT")
@@ -179,85 +177,79 @@ def _debug_field(field: DocumentField) -> dict[str, Any]:
 
 def _debug_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        str(name): _debug_field(field)
+        str(name): _debug_value(field)
         for name, field in fields.items()
-        if isinstance(field, DocumentField)
     }
+
+
+def _debug_line_polygon(line: Any) -> list[Any] | None:
+    polygon = getattr(line, "polygon", None)
+    if not polygon:
+        polygon = getattr(line, "bounding_polygon", None)
+    if not isinstance(polygon, Sequence) or isinstance(
+        polygon,
+        (str, bytes),
+    ):
+        return None
+    if polygon and isinstance(polygon[0], (int, float)):
+        return list(polygon)
+
+    points: list[dict[str, float]] = []
+    for point in polygon:
+        if isinstance(point, Mapping):
+            x = point.get("x")
+            y = point.get("y")
+        else:
+            x = getattr(point, "x", None)
+            y = getattr(point, "y", None)
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            points.append({"x": float(x), "y": float(y)})
+    return points or None
+
+
+async def _validate_uploaded_document(
+    file: UploadFile,
+) -> ValidatedDocument:
+    content = await file.read(MAX_FILE_SIZE + 1)
+    try:
+        return DocumentValidator.validate(
+            content,
+            original_filename=file.filename,
+            declared_content_type=file.content_type,
+        )
+    except DocumentInputError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=str(error),
+        ) from None
 
 
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-
-    # Validate file type
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Only JPG, PNG, and PDF files are supported."
-        )
-
-    content = await file.read()
-
-    # Validate empty file
-    if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded file is empty."
-        )
-
-    # Validate file size
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail="Maximum file size is 10 MB."
-        )
-
-    # Generate unique filename
-    extension = Path(file.filename or "").suffix.lower()
-
-    stored_filename = f"{uuid4()}{extension}"
-
+    document = await _validate_uploaded_document(file)
+    stored_filename = f"{uuid4()}{document.storage_extension}"
+    UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
     destination = UPLOAD_DIRECTORY / stored_filename
-
-    # Save file
-    destination.write_bytes(content)
+    destination.write_bytes(document.original_content)
 
     return {
-        "original_filename": file.filename,
+        "original_filename": document.original_filename,
         "stored_filename": stored_filename,
-        "content_type": file.content_type,
-        "size": len(content),
+        "content_type": document.detected_content_type,
+        "size": document.size_bytes,
         "status": "uploaded"
     }
 
 
 @router.post("/analyze", response_model=Receipt)
 async def analyze_document(file: UploadFile = File(...)) -> Receipt:
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Only JPG, PNG, and PDF files are supported."
-        )
-
-    content = await file.read()
-
-    if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded file is empty."
-        )
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail="Maximum file size is 10 MB."
-        )
-
+    document = await _validate_uploaded_document(file)
     try:
-        extraction = await ReceiptExtractionService().extract(content)
-    except DocumentIntelligenceError:
+        extraction = await ReceiptExtractionService().extract(document)
+    except DocumentIntelligenceError as error:
         raise HTTPException(
-            status_code=502,
-            detail="Document analysis failed."
+            status_code=error.status_code,
+            detail=error.public_message,
         ) from None
 
     return extraction.receipt
@@ -265,46 +257,72 @@ async def analyze_document(file: UploadFile = File(...)) -> Receipt:
 
 @router.post("/debug-analysis")
 async def debug_analyze_document(file: UploadFile = File(...)) -> dict[str, Any]:
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Only JPG, PNG, and PDF files are supported."
-        )
-
-    content = await file.read()
-
-    if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded file is empty."
-        )
-
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail="Maximum file size is 10 MB."
-        )
-
+    document = await _validate_uploaded_document(file)
     service = AzureDocumentIntelligenceService()
     try:
-        result = await run_in_threadpool(service.analyze_document, content)
-    except DocumentIntelligenceError:
+        result = await run_in_threadpool(
+            service.analyze_document,
+            document,
+        )
+    except DocumentIntelligenceError as error:
         raise HTTPException(
-            status_code=502,
-            detail="Document analysis failed."
+            status_code=error.status_code,
+            detail=error.public_message,
         ) from None
 
     documents = getattr(result, "documents", None) or []
-    return {
-        "content": result.content,
-        "documents": [
+    logger.info("Azure AnalyzeResult.content: %r", result.content)
+    debug_documents: list[dict[str, Any]] = []
+    for document_index, document in enumerate(documents):
+        fields = getattr(document, "fields", None) or {}
+        field_names = sorted(str(name) for name in fields)
+        items = _debug_value(fields.get("Items"))
+        logger.info(
+            "Azure receipt document %d structured field names: %s",
+            document_index,
+            field_names,
+        )
+        logger.info(
+            "Azure receipt document %d returned items: %r",
+            document_index,
+            items,
+        )
+        debug_documents.append(
             {
                 "document_type": document.doc_type,
                 "confidence": document.confidence,
-                "fields": _debug_fields(document.fields or {}),
+                "field_names": field_names,
+                "fields": _debug_fields(fields),
+                "items": items,
             }
-            for document in documents
-        ],
+        )
+
+    debug_pages: list[dict[str, Any]] = []
+    for page_index, page in enumerate(getattr(result, "pages", None) or []):
+        lines: list[dict[str, Any]] = []
+        for line_index, line in enumerate(getattr(page, "lines", None) or []):
+            line_text = getattr(line, "content", None)
+            polygon = _debug_line_polygon(line)
+            logger.info(
+                "Azure OCR page %d line %d: text=%r polygon=%r",
+                page_index,
+                line_index,
+                line_text,
+                polygon,
+            )
+            lines.append(
+                {
+                    "index": line_index,
+                    "text": line_text,
+                    "polygon": polygon,
+                }
+            )
+        debug_pages.append({"index": page_index, "lines": lines})
+
+    return {
+        "content": result.content,
+        "documents": debug_documents,
+        "pages": debug_pages,
     }
 
 
@@ -313,44 +331,17 @@ async def process_document(
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_db_session),
 ) -> DocumentProcessResponse:
-    content_type = file.content_type
-    if content_type is None or content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=415,
-            detail="Only JPG, PNG, and PDF files are supported.",
-        )
-
-    content = await file.read(MAX_FILE_SIZE + 1)
-    if not content:
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded file is empty.",
-        )
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail="Maximum file size is 10 MB.",
-        )
-
-    original_filename = file.filename or "uploaded-document"
-    accepted_extensions = {
-        "image/jpeg": {".jpg", ".jpeg"},
-        "image/png": {".png"},
-        "application/pdf": {".pdf"},
-    }
-    original_extension = Path(original_filename).suffix.lower()
-    extensions = accepted_extensions[content_type]
-    extension = (
-        original_extension
-        if original_extension in extensions
-        else next(iter(sorted(extensions)))
-    )
-    stored_filename = f"{uuid4()}{extension}"
+    validated_document = await _validate_uploaded_document(file)
+    original_filename = validated_document.original_filename
+    stored_filename = f"{uuid4()}{validated_document.storage_extension}"
     stored_path = UPLOAD_DIRECTORY / stored_filename
 
     try:
         UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
-        await run_in_threadpool(stored_path.write_bytes, content)
+        await run_in_threadpool(
+            stored_path.write_bytes,
+            validated_document.original_content,
+        )
     except Exception:
         _remove_process_upload(stored_path)
         logger.exception("Failed to store uploaded document.")
@@ -360,12 +351,14 @@ async def process_document(
         ) from None
 
     try:
-        extraction = await ReceiptExtractionService().extract(content)
-    except DocumentIntelligenceError:
+        extraction = await ReceiptExtractionService().extract(
+            validated_document
+        )
+    except DocumentIntelligenceError as error:
         _remove_process_upload(stored_path)
         raise HTTPException(
-            status_code=502,
-            detail="Document analysis failed.",
+            status_code=error.status_code,
+            detail=error.public_message,
         ) from None
     except ValueError:
         _remove_process_upload(stored_path)
@@ -385,7 +378,7 @@ async def process_document(
         document = await ReceiptPersistenceService(session).persist(
             original_filename=original_filename,
             stored_filename=stored_filename,
-            content_type=content_type,
+            content_type=validated_document.detected_content_type,
             receipt=extraction.receipt,
             raw_ocr_content=extraction.raw_ocr_content,
         )

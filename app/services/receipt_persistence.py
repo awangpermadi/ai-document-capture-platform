@@ -57,6 +57,7 @@ class ReceiptPersistenceService:
                 cash=receipt.transaction.cash,
                 change=receipt.transaction.change,
                 currency=receipt.transaction.currency,
+                payment_method=receipt.transaction.payment_method,
                 extraction_method=receipt.extraction_method,
                 confidence=receipt.confidence,
             )

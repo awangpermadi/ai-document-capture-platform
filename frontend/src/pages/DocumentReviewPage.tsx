@@ -1,16 +1,16 @@
 import {
-  ArrowLeft,
   Check,
-  ChevronDown,
+  CheckCircle2,
   FileImage,
   FileText,
   LoaderCircle,
   Plus,
   Save,
   Trash2,
+  TriangleAlert,
 } from 'lucide-react'
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   normalizeApiError,
   normalizeDocumentDeleteError,
@@ -25,6 +25,7 @@ import { DeleteDocumentDialog } from '../components/common/DeleteDocumentDialog'
 import { ErrorState } from '../components/common/ErrorState'
 import { LoadingState } from '../components/common/LoadingState'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { Toast } from '../components/common/Toast'
 import { ReceiptItems } from '../components/receipt/ReceiptItems'
 import { ReceiptSummary } from '../components/receipt/ReceiptSummary'
 import {
@@ -79,6 +80,13 @@ interface ReviewLoadState {
   key: string
   document?: DocumentDetail
   error?: string
+}
+
+function wasDocumentProcessed(state: unknown): boolean {
+  return typeof state === 'object'
+    && state !== null
+    && 'documentProcessed' in state
+    && state.documentProcessed === true
 }
 
 const transactionFields: Array<{
@@ -180,12 +188,15 @@ function LoadingButton({ label }: { label: string }) {
 
 export function DocumentReviewPage() {
   const { id } = useParams<{ id: string }>()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [retryCount, setRetryCount] = useState(0)
   const [loadState, setLoadState] = useState<ReviewLoadState | null>(null)
   const [form, setForm] = useState<CorrectionForm | null>(null)
   const [validationErrors, setValidationErrors] = useState<ValidationErrors>({})
   const [actionError, setActionError] = useState<string | null>(null)
-  const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(() =>
+    wasDocumentProcessed(location.state) ? 'Document processed' : null)
   const [saving, setSaving] = useState(false)
   const [approving, setApproving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -193,7 +204,6 @@ export function DocumentReviewPage() {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [approvalOpen, setApprovalOpen] = useState(false)
   const dialogRef = useRef<HTMLDialogElement>(null)
-  const navigate = useNavigate()
   const stateKey = `${id ?? ''}:${retryCount}`
 
   useEffect(() => {
@@ -211,6 +221,14 @@ export function DocumentReviewPage() {
 
     return () => controller.abort()
   }, [id, stateKey])
+
+  useEffect(() => {
+    if (!wasDocumentProcessed(location.state)) return
+    navigate(`${location.pathname}${location.search}`, {
+      replace: true,
+      state: null,
+    })
+  }, [location.key, location.pathname, location.search, location.state, navigate])
 
   useEffect(() => {
     const dialog = dialogRef.current
@@ -379,7 +397,7 @@ export function DocumentReviewPage() {
       const updated = await updateReceipt(id, correction)
       setForm(null)
       setValidationErrors({})
-      setSuccessMessage('Receipt corrections saved.')
+      setSuccessMessage('Changes saved')
       await reloadAfterAction(updated)
     } catch (error: unknown) {
       setActionError(normalizeApiError(error).message)
@@ -396,7 +414,7 @@ export function DocumentReviewPage() {
     try {
       const result = await approveDocument(id, { confirmation: true })
       setApprovalOpen(false)
-      setSuccessMessage('Receipt approved. Its data is now read-only.')
+      setSuccessMessage('Receipt approved')
       if (document) {
         await reloadAfterAction({
           ...document,
@@ -443,11 +461,6 @@ export function DocumentReviewPage() {
 
   return (
     <div className="page review-page">
-      <Link className="back-link" to="/documents">
-        <ArrowLeft aria-hidden="true" size={18} />
-        Back
-      </Link>
-
       {loading ? <LoadingState label="Loading receipt review…" /> : null}
       {!loading && loadError ? (
         <ErrorState
@@ -461,19 +474,32 @@ export function DocumentReviewPage() {
           <section className="review-title">
             <div className="review-title__text">
               <p className="eyebrow">DOCUMENT</p>
-              <h1>Receipt Review</h1>
-              <p className="review-title__filename" title={document.original_filename}>
+              <h2 className="review-title__filename" title={document.original_filename}>
                 {document.original_filename}
-              </p>
+              </h2>
             </div>
             <StatusBadge status={document.status} />
           </section>
 
+          {isApproved ? (
+            <section aria-label="Approved document" className="approved-banner" role="status">
+              <CheckCircle2 aria-hidden="true" size={22} />
+              <span>
+                <strong>Approved</strong>
+                <small>
+                  {document.approved_at
+                    ? `Approved ${formatDateTime(document.approved_at)}`
+                    : 'This receipt is read-only.'}
+                </small>
+              </span>
+            </section>
+          ) : null}
+
           {successMessage ? (
-            <div className="inline-notice inline-notice--success" role="status">
-              <Check aria-hidden="true" size={17} />
-              <span>{successMessage}</span>
-            </div>
+            <Toast
+              message={successMessage}
+              onDismiss={() => setSuccessMessage(null)}
+            />
           ) : null}
           {actionError ? (
             <ErrorState
@@ -484,34 +510,33 @@ export function DocumentReviewPage() {
           ) : null}
 
           {document.requires_review ? (
-            <section className="review-notice" aria-label="Review required notice">
-              <strong>Review required</strong>
-              {document.review_reasons.length > 0 ? (
-                <ul>
-                  {document.review_reasons.map((reason, index) => (
+            <section aria-label="Review required notice" className="review-notice">
+              <span className="review-notice__title">
+                <TriangleAlert aria-hidden="true" size={18} />
+                <strong>Review required</strong>
+              </span>
+              {document.review_reasons.length > 0
+                ? <ul>{document.review_reasons.map((reason, index) => (
                     <li key={`${reason}-${index}`}>{reason}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p>Please check the extracted receipt details.</p>
-              )}
+                  ))}</ul>
+                : <p>Please check the extracted receipt details.</p>}
             </section>
           ) : null}
 
           <section aria-labelledby="document-info-title" className="mobile-card">
             <div className="section-title">
-              <h2 id="document-info-title">Document information</h2>
+              <h2 id="document-info-title">Document</h2>
             </div>
             <dl className="info-list">
-              <div><dt>File name</dt><dd>{document.original_filename}</dd></div>
+              <div>
+                <dt>File name</dt>
+                <dd className="document-filename">{document.original_filename}</dd>
+              </div>
               <div><dt>Document type</dt><dd>{document.document_type}</dd></div>
               {document.extraction_method ? (
                 <div><dt>Extraction method</dt><dd>{document.extraction_method}</dd></div>
               ) : null}
               <div><dt>Created</dt><dd>{formatDateTime(document.created_at)}</dd></div>
-              {document.approved_at ? (
-                <div><dt>Approved</dt><dd>{formatDateTime(document.approved_at)}</dd></div>
-              ) : null}
             </dl>
             <div className="original-document">
               <span className="original-document__icon">
@@ -521,16 +546,15 @@ export function DocumentReviewPage() {
               </span>
               <div>
                 <strong>Original receipt</strong>
-                <span>Original receipt preview will be available when file access is exposed.</span>
+                <span>Original receipt preview unavailable</span>
               </div>
-              <ChevronDown aria-hidden="true" className="original-document__placeholder" size={17} />
             </div>
           </section>
 
           {form && canEdit ? (
             <form className="review-form" onSubmit={(event) => void saveCorrection(event)}>
               <section aria-labelledby="merchant-edit-title" className="mobile-card">
-                <div className="section-title"><h2 id="merchant-edit-title">Merchant information</h2></div>
+                <div className="section-title"><h2 id="merchant-edit-title">Merchant</h2></div>
                 <div className="edit-field-list">
                   {([
                     ['name', 'Merchant name'],
@@ -550,8 +574,8 @@ export function DocumentReviewPage() {
               </section>
 
               <section aria-labelledby="transaction-edit-title" className="mobile-card">
-                <div className="section-title"><h2 id="transaction-edit-title">Transaction information</h2></div>
-                <div className="edit-field-list edit-field-list--two">
+                <div className="section-title"><h2 id="transaction-edit-title">Transaction</h2></div>
+                <div className="edit-field-list">
                   <label className="form-field">
                     <span>Date</span>
                     <input
@@ -577,6 +601,7 @@ export function DocumentReviewPage() {
                           aria-describedby={error ? `transaction-${key}-error` : undefined}
                           aria-invalid={Boolean(error)}
                           min="0"
+                          inputMode="decimal"
                           onChange={(event) => updateTransactionAmount(key, event.target.value)}
                           step="any"
                           type="number"
@@ -602,7 +627,7 @@ export function DocumentReviewPage() {
 
               <section aria-labelledby="items-edit-title" className="mobile-card">
                 <div className="section-title section-title--action">
-                  <h2 id="items-edit-title">Receipt items</h2>
+                  <h2 id="items-edit-title">Items</h2>
                   <button className="text-button" onClick={addItem} type="button">
                     <Plus aria-hidden="true" size={16} /> Add item
                   </button>
@@ -648,7 +673,7 @@ export function DocumentReviewPage() {
                               </small>
                             ) : null}
                           </label>
-                          <div className="edit-field-list--two">
+                          <div className="item-amount-grid">
                             {([
                               ['quantity', 'Quantity', '0'],
                               ['unit_price', 'Unit price', '0'],
@@ -662,6 +687,7 @@ export function DocumentReviewPage() {
                                     aria-describedby={error ? `item-${index}-${field}-error` : undefined}
                                     aria-invalid={Boolean(error)}
                                     min={field === 'quantity' ? '0.000001' : min}
+                                    inputMode="decimal"
                                     onChange={(event) => updateItemAmount(index, field, event.target.value)}
                                     step="any"
                                     type="number"
@@ -681,7 +707,7 @@ export function DocumentReviewPage() {
                 </div>
               </section>
 
-              <div className="review-action-bar">
+              <div className="review-action-bar mobile-sticky-action">
                 <button
                   className="mobile-button mobile-button--secondary"
                   disabled={saving}
@@ -695,7 +721,7 @@ export function DocumentReviewPage() {
                   disabled={saving}
                   type="submit"
                 >
-                  {saving ? <LoadingButton label="Saving…" /> : <><Save aria-hidden="true" size={18} />Save corrections</>}
+                  {saving ? <LoadingButton label="Saving…" /> : <><Save aria-hidden="true" size={18} />Save Changes</>}
                 </button>
               </div>
             </form>
@@ -710,7 +736,7 @@ export function DocumentReviewPage() {
           )}
 
           {!isApproved ? (
-            <section aria-label="Review actions" className="review-actions">
+            <section aria-label="Review actions" className="review-actions mobile-sticky-action">
               {!form ? (
                 <button
                   className="mobile-button mobile-button--secondary"
@@ -727,12 +753,12 @@ export function DocumentReviewPage() {
                   type="button"
                 >
                   <Check aria-hidden="true" size={18} />
-                  Approve
+                  Approve Receipt
                 </button>
               ) : null}
             </section>
           ) : null}
-          {!isApproved ? (
+          {!isApproved && !form ? (
             <div className="review-delete-action">
               <button
                 className="button button--secondary review-delete-action__button"
@@ -765,6 +791,7 @@ export function DocumentReviewPage() {
       />
 
       <dialog
+        aria-describedby="approval-dialog-message"
         aria-labelledby="approval-dialog-title"
         className="approval-dialog"
         onCancel={(event) => {
@@ -775,10 +802,13 @@ export function DocumentReviewPage() {
         ref={dialogRef}
       >
         <div className="approval-dialog__icon"><Check aria-hidden="true" size={23} /></div>
-        <h2 id="approval-dialog-title">Approve this receipt?</h2>
-        <p>Approved receipt data will become read-only and can no longer be corrected.</p>
+        <h2 id="approval-dialog-title">Approve receipt?</h2>
+        <p id="approval-dialog-message">
+          Please confirm that the extracted information is correct.
+        </p>
         <div className="approval-dialog__actions">
           <button
+            autoFocus
             className="mobile-button mobile-button--secondary"
             disabled={approving}
             onClick={() => setApprovalOpen(false)}
@@ -792,7 +822,7 @@ export function DocumentReviewPage() {
             onClick={() => void confirmApproval()}
             type="button"
           >
-            {approving ? <LoadingButton label="Approving…" /> : 'Approve receipt'}
+            {approving ? <LoadingButton label="Approving…" /> : 'Approve'}
           </button>
         </div>
       </dialog>

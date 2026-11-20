@@ -68,6 +68,7 @@ class ReceiptCorrectionTransaction(BaseModel):
     cash: NonNegativeAmount
     change: NonNegativeAmount
     currency: str = "IDR"
+    payment_method: str | None = None
 
 
 class ReceiptItemCorrection(BaseModel):
@@ -77,7 +78,7 @@ class ReceiptItemCorrection(BaseModel):
     description_raw: str | None
     description_normalized: str | None
     quantity: PositiveQuantity
-    unit_price: NonNegativeAmount
+    unit_price: NonNegativeAmount = None
     total_price: NonNegativeAmount
     confidence: float | None = Field(
         default=None,

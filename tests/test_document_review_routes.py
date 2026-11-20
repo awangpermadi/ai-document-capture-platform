@@ -1,11 +1,15 @@
 import asyncio
+import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
+from PIL import Image
 from azure.ai.documentintelligence.models import (
     AnalyzeResult,
     AnalyzedDocument,
@@ -28,11 +32,22 @@ from app.exceptions import DocumentReviewPersistenceError
 from app.main import app
 from app.models import Base, Document, DocumentStatus, ReceiptItemModel, ReceiptModel
 from app.routes.documents import router as documents_router
+from app.services.document_input import ValidatedDocument
 from app.services.document_intelligence import DocumentIntelligenceError
 from app.services.document_review import DocumentReviewService
 
 
-def correction_body() -> dict[str, object]:
+def valid_jpeg_bytes() -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (4, 4), color="white").save(output, format="JPEG")
+    return output.getvalue()
+
+
+def valid_pdf_bytes() -> bytes:
+    return b"%PDF-1.4\n%%EOF"
+
+
+def correction_body() -> dict[str, Any]:
     return {
         "merchant": {
             "name": "Reviewed merchant",
@@ -214,6 +229,17 @@ def tlogomas_analyze_result() -> AnalyzeResult:
         "77,400\n75,400\n100,500\n25,100\n2,000\n"
         "DPP= 70,364 PPN= 7,036"
     )
+    item_values = [
+        ("POP MIE AYAM 75G", 1, 4900, 4900),
+        ("POP MIE PD.DWR AYM75", 1, 5400, 5400),
+        ("NESTLE PURE LIFE 600", 2, 3600, 7200),
+        ("LE MINERALE 600ML", 2, 3500, 7000),
+        ("ULTRA KCNG HIJAU 250", 1, 4900, 4900),
+        ("NUTRIJEL PWD.STRW. 15", 2, 6600, 13200),
+        ("KNZLER SNGLES KJU 65", 1, 8700, 8700),
+        ("KNZLER SNGLES HOT 65", 1, 8700, 8700),
+        ("KANZLER BAKSO ORI 48G", 2, 8700, 17400),
+    ]
     fields = {
         "MerchantName": DocumentField(value_string="Tlogomas"),
         "Subtotal": DocumentField(
@@ -231,13 +257,15 @@ def tlogomas_analyze_result() -> AnalyzeResult:
                     confidence=0.99,
                     value_object={
                         "Description": DocumentField(
-                            value_string="Receipt item"
+                            value_string=description
                         ),
-                        "Quantity": DocumentField(value_number=1),
-                        "Price": DocumentField(value_number=75400),
-                        "TotalPrice": DocumentField(value_number=75400),
+                        "Quantity": DocumentField(value_number=quantity),
+                        "Price": DocumentField(value_number=unit_price),
+                        "TotalPrice": DocumentField(value_number=total_price),
                     },
                 )
+                for description, quantity, unit_price, total_price
+                in item_values
             ]
         ),
     }
@@ -253,6 +281,78 @@ def tlogomas_analyze_result() -> AnalyzeResult:
             )
         ],
         documents=[AnalyzedDocument(confidence=0.99, fields=fields)],
+    )
+
+
+def generic_analyze_result(content: str) -> AnalyzeResult:
+    return AnalyzeResult(
+        content=content,
+        pages=[
+            SimpleNamespace(
+                lines=[
+                    SimpleNamespace(content=line)
+                    for line in content.splitlines()
+                    if line.strip()
+                ]
+            )
+        ],
+        documents=[
+            AnalyzedDocument(
+                confidence=0.45,
+                fields={},
+            )
+        ],
+    )
+
+
+def sari_roti_analyze_result(
+    *,
+    structured_total: float | None = None,
+) -> AnalyzeResult:
+    fixture_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "sari_roti_ocr_layout.json"
+    )
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    page = SimpleNamespace(
+        lines=[
+            SimpleNamespace(
+                content=line["content"],
+                polygon=[
+                    SimpleNamespace(x=x, y=y)
+                    for x, y in line["polygon"]
+                ],
+            )
+            for line in fixture["pages"][0]["lines"]
+        ]
+    )
+    fields = {
+        "Subtotal": DocumentField(
+            value_currency=CurrencyValue(
+                amount=4_500,
+                currency_code="IDR",
+            )
+        ),
+        "TotalTax": DocumentField(value_number=409),
+    }
+    if structured_total is not None:
+        fields["Total"] = DocumentField(
+            value_currency=CurrencyValue(
+                amount=structured_total,
+                currency_code="IDR",
+            )
+        )
+
+    return AnalyzeResult(
+        content=fixture["content"],
+        pages=[page],
+        documents=[
+            AnalyzedDocument(
+                confidence=0.95,
+                fields=fields,
+            )
+        ],
     )
 
 
@@ -332,9 +432,63 @@ def test_put_correction_updates_receipt_and_items(review_client) -> None:
         "cash": 100500,
         "change": 25100,
         "currency": "IDR",
+        "payment_method": None,
     }
     assert body["receipt"]["items"][0]["description_normalized"] == "Reviewed item"
     assert body["receipt"]["items"][0]["source"] == "human_review"
+
+
+def test_put_correction_updates_payment_method_when_supplied(
+    review_client,
+) -> None:
+    client, session_factory = review_client
+    document_id = create_document(session_factory)
+    body = correction_body()
+    body["transaction"]["payment_method"] = "Debit BCA"
+
+    response = client.put(
+        f"/documents/{document_id}/receipt",
+        headers={"X-Reviewed-By": "Reviewer"},
+        json=body,
+    )
+
+    assert response.status_code == 200, response.text
+    assert (
+        response.json()["receipt"]["transaction"]["payment_method"]
+        == "Debit BCA"
+    )
+
+
+def test_put_correction_preserves_payment_method_when_omitted(
+    review_client,
+) -> None:
+    client, session_factory = review_client
+    document_id = create_document(session_factory)
+
+    async def set_payment_method() -> None:
+        async with session_factory() as session:
+            receipt = (
+                await session.execute(
+                    select(ReceiptModel).where(
+                        ReceiptModel.document_id == document_id
+                    )
+                )
+            ).scalar_one()
+            receipt.payment_method = "Debit BCA"
+            await session.commit()
+
+    asyncio.run(set_payment_method())
+    response = client.put(
+        f"/documents/{document_id}/receipt",
+        headers={"X-Reviewed-By": "Reviewer"},
+        json=correction_body(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert (
+        response.json()["receipt"]["transaction"]["payment_method"]
+        == "Debit BCA"
+    )
 
 
 def test_put_round_trip_preserves_metadata_for_unchanged_item(
@@ -565,9 +719,13 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
     class MockAzureDocumentIntelligenceService:
         calls = 0
 
-        def analyze_document(self, document_content: bytes) -> AnalyzeResult:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
             self.calls += 1
-            assert document_content == b"receipt"
+            assert document.analysis_content == valid_pdf_bytes()
+            assert document.detected_content_type == "application/pdf"
             return azure_result
 
     mock_azure = MockAzureDocumentIntelligenceService()
@@ -581,7 +739,7 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
         files={
             "file": (
                 "tlogomas.pdf",
-                b"receipt",
+                valid_pdf_bytes(),
                 "application/pdf",
             )
         },
@@ -604,6 +762,7 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
         "cash": 100500,
         "change": 25100,
         "currency": "IDR",
+        "payment_method": "Tunai",
     }
     assert mock_azure.calls == 1
     assert "raw_ocr_content" not in body
@@ -612,7 +771,7 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
     saved_files = list(upload_directory.iterdir())
     assert len(saved_files) == 1
     assert saved_files[0].name.endswith(".pdf")
-    assert saved_files[0].read_bytes() == b"receipt"
+    assert saved_files[0].read_bytes() == valid_pdf_bytes()
 
     async def verify_database() -> dict[str, object]:
         async with session_factory() as session:
@@ -647,6 +806,7 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
                 "cash": document.receipt.cash,
                 "change": document.receipt.change,
                 "currency": document.receipt.currency,
+                "payment_method": document.receipt.payment_method,
                 "item_line_number": document.receipt.items[0].line_number,
             }
 
@@ -656,7 +816,7 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
         "requires_review": False,
         "raw_ocr_content": azure_result.content,
         "receipt_count": 1,
-        "item_count": 1,
+        "item_count": 9,
         "subtotal": 77400,
         "discount": 2000,
         "tax": 7036,
@@ -664,8 +824,333 @@ def test_process_extracts_persists_and_returns_tlogomas_values(
         "cash": 100500,
         "change": 25100,
         "currency": "IDR",
+        "payment_method": "Tunai",
         "item_line_number": 1,
     }
+
+
+def test_analyze_reconciles_suspicious_total_from_receipt_values(
+    review_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = review_client
+    result = sari_roti_analyze_result()
+
+    class MockAzureDocumentIntelligenceService:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
+            assert document.analysis_content == valid_jpeg_bytes()
+            return result
+
+    monkeypatch.setattr(
+        "app.services.receipt_extraction.AzureDocumentIntelligenceService",
+        MockAzureDocumentIntelligenceService,
+    )
+
+    response = client.post(
+        "/documents/analyze",
+        files={
+            "file": (
+                "receipt.jpg",
+                valid_jpeg_bytes(),
+                "image/jpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["transaction"]["subtotal"] == 4_500
+    assert body["transaction"]["tax"] == 409
+    assert body["transaction"]["total"] == 4_500
+    assert body["transaction"]["cash"] == 5_000
+    assert body["transaction"]["change"] == 500
+    assert body["transaction"]["payment_method"] == "Tunai"
+    assert len(body["items"]) == 1
+    assert body["items"][0]["quantity"] == 1
+    assert body["items"][0]["unit_price"] == 4_500
+    assert body["items"][0]["total_price"] == 4_500
+    assert body["requires_review"] is True
+    assert "Merchant name was not detected" in body["review_reasons"]
+
+
+def test_analyze_overrides_invalid_structured_total_using_ocr_geometry(
+    review_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = review_client
+    result = sari_roti_analyze_result(structured_total=1)
+
+    class MockAzureDocumentIntelligenceService:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
+            assert document.analysis_content == valid_jpeg_bytes()
+            return result
+
+    monkeypatch.setattr(
+        "app.services.receipt_extraction.AzureDocumentIntelligenceService",
+        MockAzureDocumentIntelligenceService,
+    )
+
+    response = client.post(
+        "/documents/analyze",
+        files={
+            "file": (
+                "receipt.jpg",
+                valid_jpeg_bytes(),
+                "image/jpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["transaction"]["total"] == 4_500
+    assert body["transaction"]["change"] == 500
+    assert body["requires_review"] is True
+    assert (
+        "Transaction total reconciled from consistent receipt values."
+        in body["review_reasons"]
+    )
+
+
+def test_process_persists_reconciled_receipt_values(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    monkeypatch.setattr(
+        "app.routes.documents.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    result = sari_roti_analyze_result()
+
+    class MockAzureDocumentIntelligenceService:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
+            assert document.analysis_content == valid_jpeg_bytes()
+            return result
+
+    monkeypatch.setattr(
+        "app.services.receipt_extraction.AzureDocumentIntelligenceService",
+        MockAzureDocumentIntelligenceService,
+    )
+
+    response = client.post(
+        "/documents/process",
+        files={
+            "file": (
+                "receipt.jpg",
+                valid_jpeg_bytes(),
+                "image/jpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["receipt"]["transaction"]["subtotal"] == 4_500
+    assert body["receipt"]["transaction"]["tax"] == 409
+    assert body["receipt"]["transaction"]["total"] == 4_500
+    assert body["receipt"]["transaction"]["cash"] == 5_000
+    assert body["receipt"]["transaction"]["change"] == 500
+    assert len(body["receipt"]["items"]) == 1
+    assert body["receipt"]["items"][0]["quantity"] == 1
+    assert body["receipt"]["items"][0]["unit_price"] == 4_500
+    assert body["receipt"]["items"][0]["total_price"] == 4_500
+    assert body["requires_review"] is True
+    assert (
+        "Merchant name was not detected"
+        in body["review_reasons"]
+    )
+
+    async def verify_persistence() -> tuple[
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+        float | None,
+        DocumentStatus,
+    ]:
+        async with session_factory() as session:
+            document = (
+                await session.execute(
+                    select(Document)
+                    .where(Document.id == body["document_id"])
+                    .options(selectinload(Document.receipt))
+                )
+            ).scalar_one()
+            assert document.receipt is not None
+            return (
+                document.receipt.subtotal,
+                document.receipt.tax,
+                document.receipt.total,
+                document.receipt.cash,
+                document.receipt.change,
+                document.receipt.items[0].total_price,
+                document.status,
+            )
+
+    assert asyncio.run(verify_persistence()) == (
+        4_500,
+        409,
+        4_500,
+        5_000,
+        500,
+        4_500,
+        DocumentStatus.REVIEW_REQUIRED,
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name,expected_item_count",
+    [
+        ("receipt_type_1_ocr.txt", 3),
+        ("receipt_type_2_ocr.txt", 4),
+    ],
+)
+def test_analyze_returns_usable_partial_receipt_for_review(
+    review_client,
+    monkeypatch: pytest.MonkeyPatch,
+    fixture_name: str,
+    expected_item_count: int,
+) -> None:
+    client, _ = review_client
+    content = (
+        Path(__file__).parent / "fixtures" / fixture_name
+    ).read_text(encoding="utf-8")
+    result = generic_analyze_result(content)
+
+    class MockAzureDocumentIntelligenceService:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
+            assert document.analysis_content == valid_jpeg_bytes()
+            assert document.detected_content_type == "image/jpeg"
+            return result
+
+    monkeypatch.setattr(
+        "app.services.receipt_extraction.AzureDocumentIntelligenceService",
+        MockAzureDocumentIntelligenceService,
+    )
+
+    response = client.post(
+        "/documents/analyze",
+        files={
+            "file": (
+                "receipt.jpg",
+                valid_jpeg_bytes(),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["requires_review"] is True
+    assert len(body["items"]) == expected_item_count
+    assert "Merchant name was not detected" in body["review_reasons"]
+    assert any(
+        "confidence is below" in reason
+        for reason in body["review_reasons"]
+    )
+
+
+@pytest.mark.parametrize(
+    "fixture_name,expected_item_count,expected_total,expected_method",
+    [
+        ("receipt_type_1_ocr.txt", 3, 57_400, "Tunai"),
+        ("receipt_type_2_ocr.txt", 4, 43_500, "Debit BCA"),
+    ],
+)
+def test_process_persists_usable_partial_receipt_for_review(
+    review_client,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fixture_name: str,
+    expected_item_count: int,
+    expected_total: float,
+    expected_method: str,
+) -> None:
+    client, session_factory = review_client
+    content = (
+        Path(__file__).parent / "fixtures" / fixture_name
+    ).read_text(encoding="utf-8")
+    result = generic_analyze_result(content)
+    upload_directory = tmp_path / "uploads"
+    monkeypatch.setattr(
+        "app.routes.documents.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+
+    class MockAzureDocumentIntelligenceService:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
+            assert document.analysis_content == valid_jpeg_bytes()
+            assert document.detected_content_type == "image/jpeg"
+            return result
+
+    monkeypatch.setattr(
+        "app.services.receipt_extraction.AzureDocumentIntelligenceService",
+        MockAzureDocumentIntelligenceService,
+    )
+
+    response = client.post(
+        "/documents/process",
+        files={
+            "file": (
+                "receipt.jpg",
+                valid_jpeg_bytes(),
+                "application/octet-stream",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "REVIEW_REQUIRED"
+    assert body["requires_review"] is True
+    assert body["receipt"]["transaction"]["total"] == expected_total
+    assert (
+        body["receipt"]["transaction"]["payment_method"] == expected_method
+    )
+    assert len(body["receipt"]["items"]) == expected_item_count
+
+    async def verify_persistence() -> tuple[
+        DocumentStatus,
+        float | None,
+        str,
+    ]:
+        async with session_factory() as session:
+            document = (
+                await session.execute(
+                    select(Document)
+                    .where(Document.id == body["document_id"])
+                    .options(selectinload(Document.receipt))
+                )
+            ).scalar_one()
+            return (
+                document.status,
+                document.receipt.total,
+                document.content_type,
+            )
+
+    status, total, content_type = asyncio.run(verify_persistence())
+    assert status is DocumentStatus.REVIEW_REQUIRED
+    assert total == expected_total
+    assert content_type == "image/jpeg"
 
 
 def test_put_correction_requires_reviewer_header(review_client) -> None:
@@ -900,6 +1385,65 @@ def test_process_validates_uploads(
     assert response.status_code == expected_status
 
 
+def test_upload_uses_decoded_content_type_and_original_bytes(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = review_client
+    upload_directory = tmp_path / "uploads"
+    monkeypatch.setattr(
+        "app.routes.documents.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    output = BytesIO()
+    Image.new("RGB", (4, 4), color="white").save(output, format="PNG")
+    original = output.getvalue()
+
+    response = client.post(
+        "/documents/upload",
+        files={"file": ("misleading.jpg", original, "image/jpeg")},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["content_type"] == "image/png"
+    assert body["stored_filename"].endswith(".png")
+    assert (upload_directory / body["stored_filename"]).read_bytes() == original
+
+
+def test_analyze_rejects_mislabeled_webp_before_azure(
+    review_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = review_client
+    content = BytesIO()
+    Image.new("RGB", (4, 4), color="white").save(content, format="WEBP")
+
+    class UnexpectedAzureClient:
+        def begin_analyze_document(self, **kwargs: object) -> None:
+            pytest.fail("Azure must not receive mismatched image bytes")
+
+    monkeypatch.setattr(
+        "app.services.document_intelligence.DocumentIntelligenceClient",
+        lambda **kwargs: UnexpectedAzureClient(),
+    )
+
+    response = client.post(
+        "/documents/analyze",
+        files={
+            "file": (
+                "receipt.jpg",
+                content.getvalue(),
+                "image/jpeg",
+            )
+        },
+    )
+
+    assert response.status_code == 415
+    assert response.json()["detail"] == "Unsupported image format."
+
+
 def test_process_cleans_up_file_when_extraction_fails(
     review_client,
     tmp_path: Path,
@@ -913,7 +1457,10 @@ def test_process_cleans_up_file_when_extraction_fails(
     )
 
     class FailedAzureDocumentIntelligenceService:
-        def analyze_document(self, document_content: bytes) -> AnalyzeResult:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
             raise DocumentIntelligenceError("private Azure error")
 
     monkeypatch.setattr(
@@ -926,7 +1473,7 @@ def test_process_cleans_up_file_when_extraction_fails(
         files={
             "file": (
                 "tlogomas.pdf",
-                b"receipt",
+                valid_pdf_bytes(),
                 "application/pdf",
             )
         },
@@ -951,7 +1498,10 @@ def test_process_cleans_up_file_when_persistence_fails(
     azure_result = tlogomas_analyze_result()
 
     class MockAzureDocumentIntelligenceService:
-        def analyze_document(self, document_content: bytes) -> AnalyzeResult:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
             return azure_result
 
     original_commit = AsyncSession.commit
@@ -970,7 +1520,7 @@ def test_process_cleans_up_file_when_persistence_fails(
         files={
             "file": (
                 "tlogomas.pdf",
-                b"receipt",
+                valid_pdf_bytes(),
                 "application/pdf",
             )
         },
@@ -1249,7 +1799,10 @@ def test_process_marks_unvalidated_receipt_for_review(
     )
 
     class MockAzureDocumentIntelligenceService:
-        def analyze_document(self, document_content: bytes) -> AnalyzeResult:
+        def analyze_document(
+            self,
+            document: ValidatedDocument,
+        ) -> AnalyzeResult:
             return AnalyzeResult(content="", documents=[])
 
     monkeypatch.setattr(
@@ -1261,7 +1814,7 @@ def test_process_marks_unvalidated_receipt_for_review(
         files={
             "file": (
                 "unknown.pdf",
-                b"document",
+                valid_pdf_bytes(),
                 "application/pdf",
             )
         },

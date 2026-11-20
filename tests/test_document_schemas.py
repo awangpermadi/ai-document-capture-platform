@@ -64,6 +64,17 @@ def test_valid_complete_receipt_correction_defaults_currency() -> None:
     assert correction.items[0].source is None
 
 
+def test_correction_allows_missing_unit_price_when_total_is_available() -> None:
+    payload = valid_correction_payload()
+    del payload["items"][0]["unit_price"]  # type: ignore[index]
+
+    correction = ReceiptCorrectionRequest.model_validate(payload)
+
+    assert correction.items[0].quantity == 2
+    assert correction.items[0].total_price == 100
+    assert correction.items[0].unit_price is None
+
+
 def test_correction_accepts_server_metadata_but_forbids_unknown_item_fields() -> None:
     payload = valid_correction_payload()
     payload["items"][0]["confidence"] = 0.981  # type: ignore[index]

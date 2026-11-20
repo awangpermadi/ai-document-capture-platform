@@ -1,20 +1,21 @@
-import { BrowserRouter, Route, Routes } from 'react-router-dom'
-import { AppLayout } from './components/layout/AppLayout'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { MobileLayout } from './components/layout/MobileLayout'
 import './App.css'
 import { DocumentsPage } from './pages/DocumentsPage'
 import { DocumentReviewPage } from './pages/DocumentReviewPage'
-import { DashboardPage } from './pages/DashboardPage'
+import { HomePage } from './pages/HomePage'
 import { NotFoundPage } from './pages/NotFoundPage'
-import { UploadPage } from './pages/UploadPage'
+import { ScanPage } from './pages/ScanPage'
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<AppLayout />}>
-          <Route element={<DashboardPage />} path="/" />
+        <Route element={<MobileLayout />}>
+          <Route element={<HomePage />} path="/" />
           <Route element={<DocumentsPage />} path="/documents" />
-          <Route element={<UploadPage />} path="/upload" />
+          <Route element={<ScanPage />} path="/scan" />
+          <Route element={<Navigate replace to="/scan" />} path="/upload" />
           <Route element={<DocumentReviewPage />} path="/documents/:id" />
           <Route element={<NotFoundPage />} path="*" />
         </Route>

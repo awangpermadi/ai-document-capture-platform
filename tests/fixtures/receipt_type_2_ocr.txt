@@ -1,0 +1,8 @@
+1 Bread Butter Pudding 11,500
+1 Cream Brulle 14,000
+1 Choco Croissant 10,500
+1 Bank Of Chocolat 7,500
+Subtotal 43,500
+Total 43,500
+Payment 43,500
+Debit BCA 43,500

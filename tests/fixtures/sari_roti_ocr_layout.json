@@ -1,0 +1,94 @@
+{
+  "content": "SARI ROTI SW CK\n1\n4,500\n4,500\nTotal Item\n1\n4,500\nTunai\n5,000\nKembalian\nPPN (\n409)\n500",
+  "pages": [
+    {
+      "lines": [
+        {
+          "source_index": 7,
+          "content": "SARI ROTI SW CK",
+          "polygon": [[55, 624], [309, 612], [310, 657], [56, 668]]
+        },
+        {
+          "source_index": 8,
+          "content": "1",
+          "polygon": [[402, 611], [416, 611], [416, 650], [402, 650]]
+        },
+        {
+          "source_index": 9,
+          "content": "4,500",
+          "polygon": [[462, 607], [541, 606], [542, 648], [462, 649]]
+        },
+        {
+          "source_index": 10,
+          "content": "4,500",
+          "polygon": [[618, 603], [700, 599], [701, 642], [619, 646]]
+        },
+        {
+          "source_index": 11,
+          "content": "Total Item",
+          "polygon": [[60, 735], [233, 725], [235, 768], [61, 779]]
+        },
+        {
+          "source_index": 12,
+          "content": "1",
+          "polygon": [[311, 718], [325, 717], [325, 757], [312, 757]]
+        },
+        {
+          "source_index": 13,
+          "content": "4,500",
+          "polygon": [[620, 710], [702, 709], [702, 753], [621, 754]]
+        },
+        {
+          "source_index": 14,
+          "content": "Tunai",
+          "polygon": [[62, 790], [148, 785], [150, 828], [64, 833]]
+        },
+        {
+          "source_index": 15,
+          "content": "5,000",
+          "polygon": [[621, 765], [699, 764], [699, 809], [622, 809]]
+        },
+        {
+          "source_index": 16,
+          "content": "Kembalian",
+          "polygon": [[64, 847], [221, 830], [223, 871], [66, 888]]
+        },
+        {
+          "source_index": 17,
+          "content": "PPN (",
+          "polygon": [[67, 898], [173, 886], [176, 929], [70, 941]]
+        },
+        {
+          "source_index": 18,
+          "content": "409)",
+          "polygon": [[300, 867], [361, 866], [361, 909], [300, 910]]
+        },
+        {
+          "source_index": 19,
+          "content": "500",
+          "polygon": [[655, 822], [695, 822], [695, 865], [655, 865]]
+        }
+      ],
+      "words": [
+        {"source_index": 27, "content": "SARI", "polygon": [[55, 624], [121, 621], [121, 666], [56, 669]]},
+        {"source_index": 28, "content": "ROTI", "polygon": [[143, 620], [208, 617], [209, 662], [144, 665]]},
+        {"source_index": 29, "content": "SW", "polygon": [[227, 616], [260, 615], [261, 660], [228, 661]]},
+        {"source_index": 30, "content": "CK", "polygon": [[277, 614], [310, 613], [310, 657], [277, 659]]},
+        {"source_index": 31, "content": "1", "polygon": [[402, 611], [416, 610], [416, 650], [402, 651]]},
+        {"source_index": 32, "content": "4,500", "polygon": [[462, 607], [542, 606], [542, 648], [462, 650]]},
+        {"source_index": 33, "content": "4,500", "polygon": [[618, 603], [700, 600], [701, 643], [619, 646]]},
+        {"source_index": 34, "content": "Total", "polygon": [[60, 735], [143, 730], [144, 774], [61, 779]]},
+        {"source_index": 35, "content": "Item", "polygon": [[171, 729], [235, 725], [235, 768], [172, 772]]},
+        {"source_index": 36, "content": "1", "polygon": [[311, 718], [326, 717], [326, 757], [312, 757]]},
+        {"source_index": 37, "content": "4,500", "polygon": [[621, 710], [702, 709], [702, 753], [621, 754]]},
+        {"source_index": 38, "content": "Tunai", "polygon": [[63, 790], [150, 785], [150, 828], [64, 833]]},
+        {"source_index": 39, "content": "5,000", "polygon": [[621, 765], [699, 764], [699, 809], [622, 810]]},
+        {"source_index": 40, "content": "Kembalian", "polygon": [[64, 847], [222, 830], [223, 870], [66, 888]]},
+        {"source_index": 41, "content": "PPN", "polygon": [[68, 898], [121, 892], [123, 935], [70, 941]]},
+        {"source_index": 42, "content": "(", "polygon": [[157, 888], [175, 886], [176, 929], [159, 931]]},
+        {"source_index": 43, "content": "409)", "polygon": [[300, 868], [361, 866], [361, 910], [300, 911]]},
+        {"source_index": 44, "content": "500", "polygon": [[655, 822], [696, 822], [696, 866], [655, 866]]}
+      ]
+    }
+  ]
+}

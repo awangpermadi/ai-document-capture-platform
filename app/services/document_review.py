@@ -167,6 +167,10 @@ class DocumentReviewService:
             receipt.cash = correction.transaction.cash
             receipt.change = correction.transaction.change
             receipt.currency = correction.transaction.currency
+            if "payment_method" in correction.transaction.model_fields_set:
+                receipt.payment_method = (
+                    correction.transaction.payment_method
+                )
 
             old_items = {item.id: item for item in receipt.items}
             used_item_ids: set[str] = set()
@@ -330,6 +334,7 @@ class DocumentReviewService:
                     "cash": model.cash,
                     "change": model.change,
                     "currency": model.currency,
+                    "payment_method": model.payment_method,
                 },
                 "items": [
                     {

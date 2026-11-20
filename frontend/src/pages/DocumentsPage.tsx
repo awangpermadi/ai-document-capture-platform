@@ -1,11 +1,10 @@
 import {
-  ArrowLeft,
-  ArrowRight,
-  Check,
-  FileStack,
+  Camera,
+  ChevronRight,
+  EllipsisVertical,
+  FileImage,
   FileText,
   Trash2,
-  TriangleAlert,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
@@ -17,8 +16,8 @@ import { deleteDocument, getDocuments } from '../api/documents'
 import { DeleteDocumentDialog } from '../components/common/DeleteDocumentDialog'
 import { EmptyState } from '../components/common/EmptyState'
 import { ErrorState } from '../components/common/ErrorState'
-import { LoadingState } from '../components/common/LoadingState'
 import { StatusBadge } from '../components/common/StatusBadge'
+import { Toast } from '../components/common/Toast'
 import {
   DocumentStatus,
   type DocumentListItem,
@@ -26,14 +25,26 @@ import {
 } from '../types/document'
 import { formatDateTime } from '../utils/date'
 
-type StatusFilter = 'all' | DocumentStatus
-type ReviewFilter = 'all' | 'yes' | 'no'
+type HistoryFilter = 'all' | 'review' | 'approved' | 'extracted' | 'failed'
 
-interface QueueState {
+interface HistoryState {
   key: string
-  documents?: DocumentListItem[]
+  documents: DocumentListItem[]
+  hasMore: boolean
   error?: string
+  loadingMore?: boolean
+  moreError?: string
 }
+
+const PAGE_SIZE = 50
+
+const filters: Array<{ value: HistoryFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'review', label: 'Review' },
+  { value: 'approved', label: 'Approved' },
+  { value: 'extracted', label: 'Extracted' },
+  { value: 'failed', label: 'Failed' },
+]
 
 function hasDeletionNotice(state: unknown): boolean {
   return typeof state === 'object'
@@ -56,73 +67,82 @@ function getDeletionWarning(state: unknown): string | null {
   return state.deletionWarning
 }
 
-const PAGE_SIZE_OPTIONS = [25, 50, 100] as const
-const DEFAULT_PAGE_SIZE = 50
-
-const statusOptions: Array<{ value: DocumentStatus; label: string }> = [
-  { value: DocumentStatus.UPLOADED, label: 'UPLOADED' },
-  { value: DocumentStatus.PROCESSING, label: 'PROCESSING' },
-  { value: DocumentStatus.EXTRACTED, label: 'EXTRACTED' },
-  { value: DocumentStatus.REVIEW_REQUIRED, label: 'REVIEW_REQUIRED' },
-  { value: DocumentStatus.APPROVED, label: 'APPROVED' },
-  { value: DocumentStatus.FAILED, label: 'FAILED' },
-]
+function getFilterParams(filter: HistoryFilter): DocumentListParams {
+  switch (filter) {
+    case 'review':
+      return { requires_review: true }
+    case 'approved':
+      return { status: DocumentStatus.APPROVED }
+    case 'extracted':
+      return { status: DocumentStatus.EXTRACTED }
+    case 'failed':
+      return { status: DocumentStatus.FAILED }
+    default:
+      return {}
+  }
+}
 
 export function DocumentsPage() {
   const location = useLocation()
   const navigate = useNavigate()
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('all')
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE)
-  const [pageIndex, setPageIndex] = useState(0)
+  const [filter, setFilter] = useState<HistoryFilter>('all')
   const [retry, setRetry] = useState(0)
-  const [state, setState] = useState<QueueState | null>(null)
+  const [loadState, setLoadState] = useState<HistoryState | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<DocumentListItem | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [successMessage, setSuccessMessage] = useState<string | null>(() =>
+  const [toast, setToast] = useState<string | null>(() =>
     hasDeletionNotice(location.state) ? 'Document deleted' : null)
-  const [successWarning, setSuccessWarning] = useState<string | null>(() =>
+  const [toastWarning, setToastWarning] = useState<string | null>(() =>
     getDeletionWarning(location.state))
-  const [successSequence, setSuccessSequence] = useState(0)
-  const successNoticeRef = useRef<HTMLDivElement>(null)
-  const stateKey = `${statusFilter}:${reviewFilter}:${pageSize}:${pageIndex}:${retry}`
+  const [toastVersion, setToastVersion] = useState(0)
+  const moreRequestRef = useRef<AbortController | null>(null)
+  const stateKey = `${filter}:${retry}`
 
   useEffect(() => {
     const controller = new AbortController()
-    const filters: DocumentListParams = { limit: pageSize }
-
-    if (statusFilter !== 'all') filters.status = statusFilter
-    if (reviewFilter !== 'all') {
-      filters.requires_review = reviewFilter === 'yes'
+    const request = {
+      ...getFilterParams(filter),
+      limit: PAGE_SIZE,
     }
-    if (pageIndex > 0) filters.offset = pageIndex * pageSize
 
-    void getDocuments(filters, controller.signal)
-      .then((documents) => setState({ key: stateKey, documents }))
+    void getDocuments(request, controller.signal)
+      .then((documents) => setLoadState({
+        key: stateKey,
+        documents,
+        hasMore: documents.length === PAGE_SIZE,
+      }))
       .catch((error: unknown) => {
         if (controller.signal.aborted) return
-        setState({
+        setLoadState({
           key: stateKey,
+          documents: [],
+          hasMore: false,
           error: normalizeApiError(error).message,
         })
       })
 
-    return () => controller.abort()
-  }, [pageIndex, pageSize, retry, reviewFilter, stateKey, statusFilter])
+    return () => {
+      controller.abort()
+      moreRequestRef.current?.abort()
+    }
+  }, [filter, retry, stateKey])
 
   useEffect(() => {
     if (!hasDeletionNotice(location.state)) return
     navigate(location.pathname, { replace: true, state: null })
   }, [location.key, location.pathname, location.state, navigate])
 
-  useEffect(() => {
-    if (successMessage) successNoticeRef.current?.focus()
-  }, [successMessage, successSequence])
+  const currentState = loadState?.key === stateKey ? loadState : undefined
+  const loading = currentState === undefined
+  const documents = currentState?.documents
+  const loadError = currentState?.error
 
-  const loading = state?.key !== stateKey
-  const documents = state?.key === stateKey ? state.documents : undefined
-  const error = state?.key === stateKey ? state.error : undefined
+  function showToast(message: string, warning: string | null = null) {
+    setToast(message)
+    setToastWarning(warning)
+    setToastVersion((current) => current + 1)
+  }
 
   function requestDelete(document: DocumentListItem) {
     if (document.status === DocumentStatus.APPROVED || deleting) return
@@ -149,7 +169,7 @@ export function DocumentsPage() {
     setDeleteError(null)
     try {
       const response = await deleteDocument(deleteTarget.id)
-      setState((current) => current?.documents
+      setLoadState((current) => current
         ? {
             ...current,
             documents: current.documents.filter(
@@ -157,275 +177,203 @@ export function DocumentsPage() {
             ),
           }
         : current)
-      if (pageIndex > 0 && documents?.length === 1) {
-        setPageIndex((current) => Math.max(0, current - 1))
-      }
       setDeleteTarget(null)
-      setSuccessMessage('Document deleted')
-      setSuccessWarning(response.warning ?? null)
-      setSuccessSequence((current) => current + 1)
-    } catch (deleteError: unknown) {
-      setDeleteError(normalizeDocumentDeleteError(deleteError).message)
+      showToast('Document deleted', response.warning ?? null)
+    } catch (error: unknown) {
+      setDeleteError(normalizeDocumentDeleteError(error).message)
     } finally {
       setDeleting(false)
     }
   }
 
-  function changeStatus(value: string) {
-    setStatusFilter(value === 'all' ? 'all' : value as DocumentStatus)
-    setPageIndex(0)
+  async function loadMore() {
+    if (!currentState || currentState.loadingMore || !currentState.hasMore) return
+
+    const controller = new AbortController()
+    moreRequestRef.current?.abort()
+    moreRequestRef.current = controller
+    setLoadState((current) => current?.key === stateKey
+      ? { ...current, loadingMore: true, moreError: undefined }
+      : current)
+
+    try {
+      const nextDocuments = await getDocuments({
+        ...getFilterParams(filter),
+        limit: PAGE_SIZE,
+        offset: currentState.documents.length,
+      }, controller.signal)
+      if (controller.signal.aborted) return
+      setLoadState((current) => current?.key === stateKey
+        ? {
+            ...current,
+            documents: [...current.documents, ...nextDocuments],
+            hasMore: nextDocuments.length === PAGE_SIZE,
+            loadingMore: false,
+          }
+        : current)
+    } catch (error: unknown) {
+      if (controller.signal.aborted) return
+      setLoadState((current) => current?.key === stateKey
+        ? {
+            ...current,
+            loadingMore: false,
+            moreError: normalizeApiError(error).message,
+          }
+        : current)
+    }
   }
 
-  function changeReview(value: string) {
-    setReviewFilter(value as ReviewFilter)
-    setPageIndex(0)
-  }
-
-  function changePageSize(value: string) {
-    setPageSize(Number(value))
-    setPageIndex(0)
+  function closeMenu(details: HTMLDetailsElement | null) {
+    if (details) details.open = false
   }
 
   return (
-    <div className="page document-queue-page">
+    <div className="page history-page">
       <section className="page-intro">
-        <div>
-          <p className="eyebrow">DOCUMENT MANAGEMENT</p>
-          <h2>Documents</h2>
-          <p>Review and manage processed documents.</p>
-        </div>
-        <div className="queue-filters">
-          <label className="filter-field">
-            <span>Status</span>
-            <select
-              onChange={(event) => changeStatus(event.target.value)}
-              value={statusFilter}
-            >
-              <option value="all">All</option>
-              {statusOptions.map(({ value, label }) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          </label>
-          <label className="filter-field">
-            <span>Requires Review</span>
-            <select
-              onChange={(event) => changeReview(event.target.value)}
-              value={reviewFilter}
-            >
-              <option value="all">All</option>
-              <option value="yes">Yes</option>
-              <option value="no">No</option>
-            </select>
-          </label>
-          <label className="filter-field filter-field--limit">
-            <span>Rows</span>
-            <select
-              onChange={(event) => changePageSize(event.target.value)}
-              value={pageSize}
-            >
-              {PAGE_SIZE_OPTIONS.map((size) => (
-                <option key={size} value={size}>{size}</option>
-              ))}
-            </select>
-          </label>
-        </div>
+        <p>Your processed receipts, all in one place.</p>
       </section>
 
-      {successMessage ? (
-        <div
-          className="inline-notice inline-notice--success queue-delete-success"
-          ref={successNoticeRef}
-          role="status"
-          tabIndex={-1}
-        >
-          <Check aria-hidden="true" size={17} />
-          <span>{successMessage}</span>
-        </div>
+      <div aria-label="Filter documents" className="filter-chips" role="group">
+        {filters.map(({ value, label }) => (
+          <button
+            aria-pressed={filter === value}
+            className={`filter-chip${filter === value ? ' filter-chip--active' : ''}`}
+            key={value}
+            onClick={() => setFilter(value)}
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {toast ? (
+        <Toast
+          key={toastVersion}
+          message={toast}
+          onDismiss={() => setToast(null)}
+        />
       ) : null}
-      {successWarning ? (
-        <div className="inline-notice inline-notice--warning queue-delete-warning" role="status">
-          <TriangleAlert aria-hidden="true" size={17} />
-          <span>{successWarning}</span>
-        </div>
+      {toastWarning ? (
+        <Toast
+          key={`warning-${toastVersion}`}
+          message={toastWarning}
+          onDismiss={() => setToastWarning(null)}
+          variant="warning"
+        />
       ) : null}
 
-      <section aria-label="Documents" className="content-card">
-        {loading ? <LoadingState label="Loading documents…" /> : null}
-        {!loading && error ? (
-          <ErrorState
-            message={error}
-            onRetry={() => setRetry((current) => current + 1)}
-          />
-        ) : null}
-        {!loading && !error && documents?.length === 0 ? (
-          <EmptyState
-            message={
-              statusFilter === 'all' && reviewFilter === 'all'
-                ? 'Documents will appear here after they are processed.'
-                : 'No documents match the selected filters.'
-            }
-            title="No documents found"
-          />
-        ) : null}
-        {!loading && !error && documents && documents.length > 0 ? (
-          <>
-            <div className="content-card__heading content-card__heading--queue">
-              <div>
-                <h2>Document queue</h2>
-                <p>{documents.length} {documents.length === 1 ? 'document' : 'documents'} on this page</p>
-              </div>
-              <FileStack aria-hidden="true" size={20} />
-            </div>
-            <div className="queue-mobile-list">
-              {documents.map((document) => (
-                <article className="queue-document-card" key={document.id}>
-                  <div className="queue-document-card__heading">
-                    <div className="queue-document-card__filename">
-                      <FileText aria-hidden="true" size={17} />
-                      <strong title={document.original_filename}>
-                        {document.original_filename}
-                      </strong>
-                    </div>
-                    <StatusBadge status={document.status} />
-                  </div>
-                  <dl className="queue-document-card__details">
-                    <div>
-                      <dt>Type</dt>
-                      <dd>{document.document_type}</dd>
-                    </div>
-                    <div>
-                      <dt>Extraction</dt>
-                      <dd>{document.extraction_method ?? '—'}</dd>
-                    </div>
-                    <div>
-                      <dt>Review</dt>
-                      <dd>
-                        {document.requires_review
-                          ? 'Review Required'
-                          : 'No Review Required'}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt>Created</dt>
-                      <dd>{formatDateTime(document.created_at)}</dd>
-                    </div>
-                  </dl>
-                  <div className="queue-document-card__actions">
+      {loading ? (
+        <div aria-label="Loading document history" className="history-list">
+          <div className="history-skeleton" />
+          <div className="history-skeleton" />
+          <div className="history-skeleton" />
+        </div>
+      ) : null}
+      {!loading && loadError ? (
+        <ErrorState
+          message={loadError}
+          onRetry={() => setRetry((current) => current + 1)}
+        />
+      ) : null}
+      {!loading && documents?.length === 0 && !loadError ? (
+        <EmptyState
+          action={
+            <Link className="primary-button" to="/scan">
+              <Camera aria-hidden="true" size={18} />
+              Scan Receipt
+            </Link>
+          }
+          message={
+            filter === 'all'
+              ? 'Scan your first receipt to get started.'
+              : 'No documents match this filter.'
+          }
+          title={filter === 'all' ? 'No documents yet' : 'No documents found'}
+        />
+      ) : null}
+
+      {!loading && documents && documents.length > 0 ? (
+        <>
+          <div className="history-list">
+            {documents.map((document) => (
+              <article className="document-history-card" key={document.id}>
+                <Link
+                  aria-label={`Open ${document.original_filename}`}
+                  className="document-history-card__main"
+                  to={`/documents/${encodeURIComponent(document.id)}`}
+                >
+                  <span className="document-history-card__icon">
+                    {document.content_type.startsWith('image/')
+                      ? <FileImage aria-hidden="true" size={20} />
+                      : <FileText aria-hidden="true" size={20} />}
+                  </span>
+                  <span className="document-history-card__content">
+                    <strong title={document.original_filename}>
+                      {document.original_filename}
+                    </strong>
+                    <span>{document.document_type}</span>
+                    <span className="document-history-card__meta">
+                      <StatusBadge status={document.status} />
+                      <time dateTime={document.created_at}>
+                        {formatDateTime(document.created_at)}
+                      </time>
+                    </span>
+                  </span>
+                  <ChevronRight
+                    aria-hidden="true"
+                    className="document-history-card__chevron"
+                    size={19}
+                  />
+                </Link>
+                <details className="document-history-card__menu">
+                  <summary aria-label={`More actions for ${document.original_filename}`}>
+                    <EllipsisVertical aria-hidden="true" size={20} />
+                  </summary>
+                  <div className="document-history-card__menu-content">
                     <Link
-                      className="table-action"
+                      onClick={(event) => closeMenu(event.currentTarget.closest('details'))}
                       to={`/documents/${encodeURIComponent(document.id)}`}
                     >
-                      View <ArrowRight aria-hidden="true" size={15} />
+                      View
                     </Link>
                     {document.status !== DocumentStatus.APPROVED ? (
                       <button
-                        aria-label={`Delete ${document.original_filename}`}
-                        className="document-delete-action"
-                        disabled={deleting}
-                        onClick={() => requestDelete(document)}
+                        onClick={(event) => {
+                          closeMenu(event.currentTarget.closest('details'))
+                          requestDelete(document)
+                        }}
                         type="button"
                       >
                         <Trash2 aria-hidden="true" size={16} />
-                        Delete
+                        Delete Document
                       </button>
                     ) : null}
                   </div>
-                </article>
-              ))}
-            </div>
-            <div className="table-scroll">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th scope="col">Document</th>
-                    <th scope="col">Type</th>
-                    <th scope="col">Status</th>
-                    <th scope="col">Extraction</th>
-                    <th scope="col">Review</th>
-                    <th scope="col">Created</th>
-                    <th scope="col">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {documents.map((document) => (
-                    <tr key={document.id}>
-                      <td>
-                        <span className="document-name-cell">
-                          <FileText aria-hidden="true" size={17} />
-                          <span
-                            className="data-table__filename"
-                            title={document.original_filename}
-                          >
-                            {document.original_filename}
-                          </span>
-                        </span>
-                      </td>
-                      <td>{document.document_type}</td>
-                      <td><StatusBadge status={document.status} /></td>
-                      <td>{document.extraction_method ?? '—'}</td>
-                      <td>
-                        {document.requires_review
-                          ? 'Review Required'
-                          : 'No Review Required'}
-                      </td>
-                      <td>{formatDateTime(document.created_at)}</td>
-                      <td>
-                        <div className="document-row-actions">
-                          <Link
-                            className="table-action"
-                            to={`/documents/${encodeURIComponent(document.id)}`}
-                          >
-                            View <ArrowRight aria-hidden="true" size={15} />
-                          </Link>
-                          {document.status !== DocumentStatus.APPROVED ? (
-                            <button
-                              aria-label={`Delete ${document.original_filename}`}
-                              className="document-delete-action"
-                              disabled={deleting}
-                              onClick={() => requestDelete(document)}
-                              type="button"
-                            >
-                              <Trash2 aria-hidden="true" size={16} />
-                              Delete
-                            </button>
-                          ) : null}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        ) : null}
-        {!loading && !error && documents
-        && (documents.length > 0 || pageIndex > 0) ? (
-          <nav aria-label="Document pages" className="queue-pagination">
-            <span>Page {pageIndex + 1}</span>
-            <div>
-              <button
-                className="button button--secondary"
-                disabled={pageIndex === 0}
-                onClick={() => setPageIndex((current) => Math.max(0, current - 1))}
-                type="button"
-              >
-                <ArrowLeft aria-hidden="true" size={15} />
-                Previous
-              </button>
-              <button
-                className="button button--secondary"
-                disabled={documents.length < pageSize}
-                onClick={() => setPageIndex((current) => current + 1)}
-                type="button"
-              >
-                Next
-                <ArrowRight aria-hidden="true" size={15} />
-              </button>
-            </div>
-          </nav>
-        ) : null}
-      </section>
+                </details>
+              </article>
+            ))}
+          </div>
+          {currentState?.moreError ? (
+            <ErrorState
+              message={currentState.moreError}
+              onRetry={() => void loadMore()}
+              retryLabel="Try Again"
+            />
+          ) : null}
+          {currentState?.hasMore ? (
+            <button
+              className="secondary-button history-load-more"
+              disabled={currentState.loadingMore}
+              onClick={() => void loadMore()}
+              type="button"
+            >
+              {currentState.loadingMore ? 'Loading more…' : 'Load more'}
+            </button>
+          ) : null}
+        </>
+      ) : null}
+
       <DeleteDocumentDialog
         deleting={deleting}
         documentName={deleteTarget?.original_filename ?? ''}

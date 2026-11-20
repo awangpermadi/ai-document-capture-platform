@@ -3,7 +3,7 @@ from datetime import date, time
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -58,6 +58,7 @@ def tlogomas_receipt(*, requires_review: bool = False) -> Receipt:
             cash=100500,
             change=25100,
             currency="IDR",
+            payment_method="Debit BCA",
         ),
         items=[
             ReceiptItem(
@@ -124,6 +125,7 @@ async def test_persists_tlogomas_receipt_and_related_items(
     assert receipt.cash == 100500
     assert receipt.change == 25100
     assert receipt.currency == "IDR"
+    assert receipt.payment_method == "Debit BCA"
     assert receipt.confidence == 0.99
     assert [item.line_number for item in receipt.items] == [1, 2]
     assert all(item.source == "azure_prebuilt_receipt" for item in receipt.items)
@@ -150,3 +152,32 @@ async def test_persistence_maps_review_flag_to_document_status(
     assert document.status is DocumentStatus.REVIEW_REQUIRED
     assert document.requires_review is True
     assert document.review_reasons == '["Test review reason"]'
+
+
+@pytest.mark.anyio
+async def test_initialize_database_adds_payment_method_to_existing_table(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'legacy-receipts.db'}"
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("CREATE TABLE receipts (id VARCHAR(36) PRIMARY KEY)")
+            )
+
+        await initialize_database(engine)
+
+        async with engine.connect() as connection:
+            columns = await connection.run_sync(
+                lambda sync_connection: {
+                    column["name"]
+                    for column in inspect(sync_connection).get_columns(
+                        "receipts"
+                    )
+                }
+            )
+        assert "payment_method" in columns
+    finally:
+        await engine.dispose()

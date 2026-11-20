@@ -40,6 +40,7 @@ class Transaction(BaseModel):
     cash: float | None = None
     change: float | None = None
     currency: str | None = None
+    payment_method: str | None = None
 
 
 class Receipt(BaseModel):
