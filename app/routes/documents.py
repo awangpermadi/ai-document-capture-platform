@@ -21,6 +21,7 @@ from app.models import DocumentStatus
 from app.schemas.document import (
     DocumentActionResponse,
     DocumentApprovalRequest,
+    DocumentDeleteResponse,
     DocumentDetail,
     DocumentListItem,
     DocumentProcessResponse,
@@ -34,13 +35,13 @@ from app.services.document_intelligence import (
 from app.services.document_review import DocumentReviewService
 from app.services.receipt_extraction import ReceiptExtractionService
 from app.services.receipt_persistence import ReceiptPersistenceService
+from app.storage import UPLOAD_DIRECTORY
 
 router = APIRouter(
     prefix="/documents",
     tags=["Documents"]
 )
 
-UPLOAD_DIRECTORY = Path("uploads")
 UPLOAD_DIRECTORY.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_CONTENT_TYPES = {
@@ -456,6 +457,19 @@ async def get_document_detail(
 ) -> DocumentDetail:
     return await _execute_review(
         DocumentReviewService(session).get_document_detail(document_id)
+    )
+
+
+@router.delete(
+    "/{document_id}",
+    response_model=DocumentDeleteResponse,
+)
+async def delete_document(
+    document_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> DocumentDeleteResponse:
+    return await _execute_review(
+        DocumentReviewService(session).delete_document(document_id)
     )
 
 

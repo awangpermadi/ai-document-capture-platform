@@ -1,5 +1,7 @@
 import json
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -16,10 +18,15 @@ from app.exceptions import (
 from app.models import Document, DocumentStatus, ReceiptItemModel, ReceiptModel
 from app.schemas.document import (
     DocumentActionResponse,
+    DocumentDeleteResponse,
     DocumentDetail,
     DocumentListItem,
     ReceiptCorrectionRequest,
 )
+from app.storage import UPLOAD_DIRECTORY
+
+
+logger = logging.getLogger(__name__)
 
 
 class DocumentReviewService:
@@ -61,6 +68,67 @@ class DocumentReviewService:
             raise
         except SQLAlchemyError:
             raise DocumentReviewPersistenceError() from None
+
+    async def delete_document(self, document_id: str) -> DocumentDeleteResponse:
+        file_path: Path | None = None
+        warning: str | None = None
+        try:
+            document = await self._load_document(document_id)
+            if document.status == DocumentStatus.APPROVED:
+                raise DocumentStateConflictError(
+                    "Approved documents cannot be deleted."
+                )
+
+            if document.stored_filename:
+                try:
+                    file_path = self._resolve_stored_file_path(
+                        document.stored_filename
+                    )
+                    if file_path is None:
+                        logger.warning(
+                            "Skipping uploaded file deletion because its stored "
+                            "filename resolves outside the uploads directory."
+                        )
+                        warning = "The uploaded file could not be removed."
+                except (OSError, RuntimeError, ValueError):
+                    logger.exception(
+                        "Could not safely resolve the stored document file."
+                    )
+                    warning = "The uploaded file could not be removed."
+
+            await self._session.delete(document)
+            await self._session.commit()
+        except (DocumentNotFoundError, DocumentStateConflictError):
+            await self._session.rollback()
+            raise
+        except SQLAlchemyError:
+            await self._session.rollback()
+            logger.exception("Document deletion transaction failed.")
+            raise DocumentReviewPersistenceError() from None
+        except Exception:
+            await self._session.rollback()
+            raise
+
+        if file_path is not None:
+            try:
+                file_path.unlink()
+            except FileNotFoundError:
+                logger.warning(
+                    "Uploaded document file was already missing after record deletion."
+                )
+                warning = "The uploaded file was already missing."
+            except (OSError, ValueError):
+                logger.exception(
+                    "Could not remove uploaded document file after record deletion."
+                )
+                warning = "The uploaded file could not be removed."
+
+        return DocumentDeleteResponse(
+            document_id=document_id,
+            status="DELETED",
+            message="Document deleted successfully.",
+            warning=warning,
+        )
 
     async def update_receipt_correction(
         self,
@@ -223,6 +291,18 @@ class DocumentReviewService:
         if document is None:
             raise DocumentNotFoundError()
         return document
+
+    @staticmethod
+    def _resolve_stored_file_path(stored_filename: str) -> Path | None:
+        upload_root = UPLOAD_DIRECTORY.resolve()
+        file_path = (upload_root / stored_filename).resolve()
+        try:
+            file_path.relative_to(upload_root)
+        except ValueError:
+            return None
+        if file_path == upload_root:
+            return None
+        return file_path
 
     @staticmethod
     def _to_document_detail(document: Document) -> DocumentDetail:

@@ -155,6 +155,13 @@ class DocumentActionResponse(BaseModel):
     approved_at: datetime | None = None
 
 
+class DocumentDeleteResponse(BaseModel):
+    document_id: str
+    status: Literal["DELETED"]
+    message: str
+    warning: str | None = None
+
+
 class DocumentProcessResponse(BaseModel):
     document_id: str
     status: str

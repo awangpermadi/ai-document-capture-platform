@@ -2,9 +2,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import get_settings
 from app.database.init_db import initialize_database
 from app.routes.documents import router as documents_router
+
+
+settings = get_settings()
 
 
 @asynccontextmanager
@@ -20,6 +25,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins_list,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Reviewed-By"],
+)
 
 app.include_router(documents_router)
 

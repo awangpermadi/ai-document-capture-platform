@@ -789,6 +789,7 @@ def test_document_routes_are_registered_once_and_not_shadowed() -> None:
     expected_routes = [
         ("/documents", "GET"),
         ("/documents/{document_id}", "GET"),
+        ("/documents/{document_id}", "DELETE"),
         ("/documents/{document_id}/receipt", "PUT"),
         ("/documents/{document_id}/approve", "POST"),
         ("/documents/process", "POST"),
@@ -988,6 +989,251 @@ def test_process_cleans_up_file_when_persistence_fails(
             ) or 0
 
     assert asyncio.run(get_document_count()) == 0
+
+
+def set_stored_filename(
+    session_factory: async_sessionmaker[AsyncSession],
+    document_id: str,
+    stored_filename: str,
+) -> None:
+    async def update() -> None:
+        async with session_factory() as session:
+            document = await session.get(Document, document_id)
+            assert document is not None
+            document.stored_filename = stored_filename
+            await session.commit()
+
+    asyncio.run(update())
+
+
+def document_record_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+    document_id: str,
+) -> tuple[int, int, int]:
+    async def query_counts() -> tuple[int, int, int]:
+        async with session_factory() as session:
+            document_count = await session.scalar(
+                select(func.count())
+                .select_from(Document)
+                .where(Document.id == document_id)
+            )
+            receipt_count = await session.scalar(
+                select(func.count())
+                .select_from(ReceiptModel)
+                .where(ReceiptModel.document_id == document_id)
+            )
+            item_count = await session.scalar(
+                select(func.count())
+                .select_from(ReceiptItemModel)
+                .join(ReceiptModel)
+                .where(ReceiptModel.document_id == document_id)
+            )
+            return (
+                int(document_count or 0),
+                int(receipt_count or 0),
+                int(item_count or 0),
+            )
+
+    return asyncio.run(query_counts())
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        DocumentStatus.UPLOADED,
+        DocumentStatus.PROCESSING,
+        DocumentStatus.EXTRACTED,
+        DocumentStatus.REVIEW_REQUIRED,
+        DocumentStatus.FAILED,
+    ],
+)
+def test_delete_document_removes_record_relations_and_uploaded_file(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: DocumentStatus,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    upload_directory.mkdir()
+    monkeypatch.setattr(
+        "app.services.document_review.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    document_id = create_document(session_factory, status=status)
+    stored_file = upload_directory / "stored-receipt.pdf"
+    stored_file.write_bytes(b"receipt")
+
+    response = client.delete(f"/documents/{document_id}")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "document_id": document_id,
+        "status": "DELETED",
+        "message": "Document deleted successfully.",
+        "warning": None,
+    }
+    assert not stored_file.exists()
+    assert document_record_counts(session_factory, document_id) == (0, 0, 0)
+
+
+def test_delete_document_succeeds_when_uploaded_file_is_missing(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    upload_directory.mkdir()
+    monkeypatch.setattr(
+        "app.services.document_review.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    document_id = create_document(session_factory, status=DocumentStatus.EXTRACTED)
+
+    response = client.delete(f"/documents/{document_id}")
+
+    assert response.status_code == 200
+    assert response.json()["warning"] == "The uploaded file was already missing."
+    assert "already missing" in caplog.text
+    assert document_record_counts(session_factory, document_id) == (0, 0, 0)
+
+
+def test_delete_unknown_document_returns_404(review_client) -> None:
+    client, _ = review_client
+
+    response = client.delete("/documents/not-found")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Document not found."
+
+
+def test_delete_approved_document_returns_409_and_keeps_record(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    upload_directory.mkdir()
+    monkeypatch.setattr(
+        "app.services.document_review.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    document_id = create_document(
+        session_factory,
+        status=DocumentStatus.APPROVED,
+    )
+    stored_file = upload_directory / "stored-receipt.pdf"
+    stored_file.write_bytes(b"receipt")
+
+    response = client.delete(f"/documents/{document_id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Approved documents cannot be deleted."
+    assert stored_file.read_bytes() == b"receipt"
+    assert document_record_counts(session_factory, document_id) == (1, 1, 1)
+
+    async def read_status() -> DocumentStatus | None:
+        async with session_factory() as session:
+            document = await session.get(Document, document_id)
+            return document.status if document is not None else None
+
+    assert asyncio.run(read_status()) == DocumentStatus.APPROVED
+
+
+def test_delete_does_not_remove_file_outside_upload_directory(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    upload_directory.mkdir()
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(
+        "app.services.document_review.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    document_id = create_document(session_factory, status=DocumentStatus.EXTRACTED)
+    set_stored_filename(session_factory, document_id, "../outside.txt")
+
+    response = client.delete(f"/documents/{document_id}")
+
+    assert response.status_code == 200
+    assert response.json()["warning"] == "The uploaded file could not be removed."
+    assert str(tmp_path) not in response.text
+    assert outside_file.read_text(encoding="utf-8") == "keep"
+    assert document_record_counts(session_factory, document_id) == (0, 0, 0)
+
+
+def test_delete_database_failure_keeps_file_and_record(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    upload_directory.mkdir()
+    monkeypatch.setattr(
+        "app.services.document_review.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    document_id = create_document(session_factory, status=DocumentStatus.EXTRACTED)
+    stored_file = upload_directory / "stored-receipt.pdf"
+    stored_file.write_bytes(b"receipt")
+
+    async def fail_commit(self: AsyncSession) -> None:
+        raise SQLAlchemyError("private database detail")
+
+    monkeypatch.setattr(AsyncSession, "commit", fail_commit)
+    response = client.delete(f"/documents/{document_id}")
+
+    assert response.status_code == 500
+    assert "private database detail" not in response.text
+    assert response.json()["detail"] == (
+        "Document review operation could not be completed."
+    )
+    assert stored_file.read_bytes() == b"receipt"
+    assert document_record_counts(session_factory, document_id) == (1, 1, 1)
+
+
+def test_delete_file_failure_returns_safe_warning_after_commit(
+    review_client,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, session_factory = review_client
+    upload_directory = tmp_path / "uploads"
+    upload_directory.mkdir()
+    monkeypatch.setattr(
+        "app.services.document_review.UPLOAD_DIRECTORY",
+        upload_directory,
+    )
+    document_id = create_document(session_factory, status=DocumentStatus.EXTRACTED)
+    stored_file = upload_directory / "stored-receipt.pdf"
+    stored_file.write_bytes(b"receipt")
+    original_unlink = Path.unlink
+
+    def fail_target_unlink(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        if path == stored_file.resolve():
+            raise OSError("private filesystem detail")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_target_unlink)
+    response = client.delete(f"/documents/{document_id}")
+
+    assert response.status_code == 200
+    assert response.json()["warning"] == "The uploaded file could not be removed."
+    assert "private filesystem detail" not in response.text
+    assert document_record_counts(session_factory, document_id) == (0, 0, 0)
+    assert stored_file.read_bytes() == b"receipt"
 
 
 def test_process_marks_unvalidated_receipt_for_review(
